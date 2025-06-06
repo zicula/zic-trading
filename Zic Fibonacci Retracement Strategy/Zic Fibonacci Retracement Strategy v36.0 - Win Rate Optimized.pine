@@ -1,7 +1,7 @@
 //@version=5
-// Enhanced Fibonacci Retracement Strategy with Win Rate Improvements
-// Original strategy enhanced with multiple non-repainting filters
-strategy("Zic Fibonacci Retracement Strategy v36.0 - Win Rate Optimized", overlay=true,
+// Enhanced Fibonacci Retracement Strategy with Limit Orders and Market Status Detection
+// v37.1 - Fixed syntax errors and improved Market Status Detection
+strategy("Zic Fibonacci Retracement Strategy v37.1 - Limit Order & Market Status - Fixed - 2025.01.06", overlay=true,
          max_lines_count=500, max_labels_count=500, max_bars_back=5000,
          initial_capital=1000,
          commission_type=strategy.commission.percent,
@@ -34,7 +34,32 @@ paint_hl_lines = input.bool(true, title="Paint High/Low Lines for Fib Period")
 hl_line_color = input.color(color.new(color.gray, 85), title="High/Low Line Color")
 hl_line_style_str = input.string("Dashed", title="High/Low Line Style", options=["Solid", "Dotted", "Dashed"])
 
-// ==================== NEW WIN RATE ENHANCEMENT INPUTS ====================
+// ==================== NEW LIMIT ORDER INPUTS ====================
+g_limit = "═══ Limit Order Settings ═══"
+use_limit_orders = input.bool(false, title="Use Limit Orders", group=g_limit)
+limit_offset_percent = input.float(0.0005, title="Limit Order Offset %", minval=0.0, maxval=0.01, step=0.0001, group=g_limit)
+
+// ==================== NEW MARKET STATUS INPUTS ====================
+g_market = "═══ Market Status Detection ═══"
+use_market_status = input.bool(true, title="Calculate from Status Market", group=g_market)
+market_tf = input.timeframe("240", title="Market Status Timeframe", group=g_market)
+
+// Individual trend controls
+allow_long_uptrend = input.bool(true, title="Allow Long in Uptrend", group=g_market)
+allow_short_downtrend = input.bool(true, title="Allow Short in Downtrend", group=g_market)
+allow_trades_sideways = input.bool(false, title="Allow Trades in Sideways", group=g_market)
+
+// Market status detection parameters
+adx_length = input.int(14, title="ADX Length", minval=5, maxval=50, group=g_market)
+adx_trend_threshold = input.float(25, title="ADX Trend Threshold", minval=15, maxval=40, step=1, group=g_market)
+ma_fast = input.int(20, title="Fast MA for Status", minval=5, maxval=50, group=g_market)
+ma_medium = input.int(50, title="Medium MA for Status", minval=20, maxval=100, group=g_market)
+ma_slow = input.int(200, title="Slow MA for Status", minval=100, maxval=300, group=g_market)
+bb_length = input.int(20, title="BB Length for Sideways", minval=10, maxval=50, group=g_market)
+bb_mult = input.float(2.0, title="BB Multiplier", minval=1.0, maxval=3.0, step=0.1, group=g_market)
+atr_mult_sideways = input.float(1.5, title="ATR Multiplier for Sideways", minval=0.5, maxval=3.0, step=0.1, group=g_market)
+
+// ==================== ORIGINAL WIN RATE ENHANCEMENT INPUTS ====================
 g1 = "═══ Trend Filter ═══"
 use_trend_filter = input.bool(true, title="Use Trend Filter", group=g1)
 trend_ma_length = input.int(21, title="Trend MA Length", minval=5, maxval=200, group=g1)
@@ -70,7 +95,7 @@ use_time_filter = input.bool(false, title="Use Time Filter", group=g7)
 start_hour = input.int(8, title="Start Hour (24h format)", minval=0, maxval=23, group=g7)
 end_hour = input.int(17, title="End Hour (24h format)", minval=0, maxval=23, group=g7)
 
-// ==================== ORIGINAL GLOBAL VARIABLES ====================
+// ==================== GLOBAL VARIABLES ====================
 var float current_fib_high_val = na
 var float current_fib_low_val = na
 var int current_fib_high_bar_idx = na
@@ -96,6 +121,16 @@ var label low_label_id = na
 var line high_marker_line_id = na
 var line low_marker_line_id = na
 
+// Variables for limit orders
+var string pending_f1_long_id = ""
+var string pending_f2_long_id = ""
+var string pending_f3_long_id = ""
+var string pending_f4_long_id = ""
+var string pending_f1_short_id = ""
+var string pending_f2_short_id = ""
+var string pending_f3_short_id = ""
+var string pending_f4_short_id = ""
+
 // ==================== HELPER FUNCTIONS ====================
 get_line_style(style_str) =>
     style = line.style_solid
@@ -106,11 +141,12 @@ get_line_style(style_str) =>
     style
 
 get_ma(src, length, ma_type) =>
-    switch ma_type
+    result = switch ma_type
         "SMA" => ta.sma(src, length)
         "EMA" => ta.ema(src, length)
         "WMA" => ta.wma(src, length)
         => ta.ema(src, length)
+    result
 
 has_open_long_positions() =>
     result = false
@@ -130,8 +166,69 @@ has_open_short_positions() =>
                 break
     result
 
-// ==================== WIN RATE ENHANCEMENT CALCULATIONS ====================
+// ==================== MARKET STATUS DETECTION ====================
+// Calculate ADX
+[adx_val, plus_di_val, minus_di_val] = ta.dmi(adx_length, adx_length)
+adx = adx_val
+plus_di = plus_di_val
+minus_di = minus_di_val
 
+// Get higher timeframe data
+htf_high = request.security(syminfo.tickerid, market_tf, high)
+htf_low = request.security(syminfo.tickerid, market_tf, low)
+htf_close = request.security(syminfo.tickerid, market_tf, close)
+
+// Calculate MAs on higher timeframe
+htf_ma_fast = request.security(syminfo.tickerid, market_tf, ta.ema(close, ma_fast))
+htf_ma_medium = request.security(syminfo.tickerid, market_tf, ta.ema(close, ma_medium))
+htf_ma_slow = request.security(syminfo.tickerid, market_tf, ta.ema(close, ma_slow))
+
+// Calculate Bollinger Bands on higher timeframe
+htf_bb_basis = request.security(syminfo.tickerid, market_tf, ta.sma(close, bb_length))
+htf_bb_dev = request.security(syminfo.tickerid, market_tf, bb_mult * ta.stdev(close, bb_length))
+htf_bb_upper = htf_bb_basis + htf_bb_dev
+htf_bb_lower = htf_bb_basis - htf_bb_dev
+htf_bb_width = htf_bb_upper - htf_bb_lower
+htf_atr = request.security(syminfo.tickerid, market_tf, ta.atr(14))
+
+// Market Status Logic
+is_ma_aligned_up = htf_ma_fast > htf_ma_medium and htf_ma_medium > htf_ma_slow
+is_ma_aligned_down = htf_ma_fast < htf_ma_medium and htf_ma_medium < htf_ma_slow
+is_strong_trend = adx > adx_trend_threshold
+
+// Calculate price position relative to MAs
+price_above_all_ma = htf_close > htf_ma_fast and htf_close > htf_ma_medium and htf_close > htf_ma_slow
+price_below_all_ma = htf_close < htf_ma_fast and htf_close < htf_ma_medium and htf_close < htf_ma_slow
+
+// Sideways detection
+is_narrow_bb = htf_bb_width < htf_atr * atr_mult_sideways
+is_ma_flat = math.abs(htf_ma_fast - htf_ma_medium) / htf_ma_medium < 0.01
+
+// Final market status determination
+market_is_uptrend = is_ma_aligned_up and is_strong_trend and price_above_all_ma and plus_di > minus_di
+market_is_downtrend = is_ma_aligned_down and is_strong_trend and price_below_all_ma and minus_di > plus_di
+market_is_sideways = not market_is_uptrend and not market_is_downtrend and (is_narrow_bb or is_ma_flat or adx < 20)
+
+// Trading permissions based on market status
+can_long_market_status = true
+can_short_market_status = true
+
+if use_market_status
+    if market_is_uptrend
+        can_long_market_status := allow_long_uptrend
+        can_short_market_status := false
+    else if market_is_downtrend
+        can_long_market_status := false
+        can_short_market_status := allow_short_downtrend
+    else if market_is_sideways
+        can_long_market_status := allow_trades_sideways
+        can_short_market_status := allow_trades_sideways
+
+// Market status label
+market_status_text = market_is_uptrend ? "UPTREND" : market_is_downtrend ? "DOWNTREND" : "SIDEWAYS"
+market_status_color = market_is_uptrend ? color.green : market_is_downtrend ? color.red : color.orange
+
+// ==================== WIN RATE ENHANCEMENT CALCULATIONS ====================
 // Trend Filter
 trend_ma = get_ma(close, trend_ma_length, trend_ma_type)
 is_uptrend = close > trend_ma
@@ -198,6 +295,10 @@ if use_time_filter
     long_filter_passed := long_filter_passed and in_trading_hours
     short_filter_passed := short_filter_passed and in_trading_hours
 
+// Add market status to filter conditions
+long_filter_passed := long_filter_passed and can_long_market_status
+short_filter_passed := short_filter_passed and can_short_market_status
+
 // ==================== ORIGINAL FIBONACCI LOGIC ====================
 var string hl_actual_line_style = get_line_style(hl_line_style_str)
 if (hl_line_style_str != hl_line_style_str[1])
@@ -211,11 +312,20 @@ float potential_new_low_val = low[0 - low_bar_offset]
 int potential_new_high_bar_idx = bar_index + high_bar_offset
 int potential_new_low_bar_idx = bar_index + low_bar_offset
 
-bool fib_points_changed = (na(current_fib_high_val) or na(current_fib_low_val) or
-     potential_new_high_val != current_fib_high_val or potential_new_low_val != current_fib_low_val or
-     potential_new_high_bar_idx != current_fib_high_bar_idx or potential_new_low_bar_idx != current_fib_low_bar_idx)
+bool fib_points_changed = na(current_fib_high_val) or na(current_fib_low_val) or potential_new_high_val != current_fib_high_val or potential_new_low_val != current_fib_low_val or potential_new_high_bar_idx != current_fib_high_bar_idx or potential_new_low_bar_idx != current_fib_low_bar_idx
 
 if fib_points_changed and barstate.isconfirmed
+    // Cancel all pending orders when Fibonacci levels change
+    if use_limit_orders
+        strategy.cancel(pending_f1_long_id)
+        strategy.cancel(pending_f2_long_id)
+        strategy.cancel(pending_f3_long_id)
+        strategy.cancel(pending_f4_long_id)
+        strategy.cancel(pending_f1_short_id)
+        strategy.cancel(pending_f2_short_id)
+        strategy.cancel(pending_f3_short_id)
+        strategy.cancel(pending_f4_short_id)
+    
     current_fib_high_val := potential_new_high_val
     current_fib_low_val := potential_new_low_val
     current_fib_high_bar_idx := potential_new_high_bar_idx
@@ -264,9 +374,7 @@ if fib_points_changed and barstate.isconfirmed
             low_marker_line_id := line.new(x1=current_fib_low_bar_idx, y1=current_fib_low_val, x2=current_fib_low_bar_idx, y2=current_fib_low_val, color=hl_line_color, style=hl_actual_line_style, width=1, extend=extend.right)
 
 // Trend background with filter indication
-bg_color = na(is_current_fib_downtrend) ? color.new(color.gray, 98) : 
-           is_current_fib_downtrend ? (short_filter_passed ? color.new(color.red, 90) : color.new(color.red, 98)) :
-           (long_filter_passed ? color.new(color.green, 90) : color.new(color.green, 98))
+bg_color = na(is_current_fib_downtrend) ? color.new(color.gray, 98) : is_current_fib_downtrend ? (short_filter_passed ? color.new(color.red, 90) : color.new(color.red, 98)) : (long_filter_passed ? color.new(color.green, 90) : color.new(color.green, 98))
 bgcolor(bg_color, title="Trend Background with Filter Status")
 
 // Plot Fibonacci levels
@@ -278,42 +386,115 @@ plot(actual_fib_4, color=color.new(color.purple, 30), title="Fib 4", style=plot.
 // Plot trend MA
 plot(use_trend_filter ? trend_ma : na, color=color.new(color.orange, 50), title="Trend MA", linewidth=1)
 
-// ==================== ENHANCED TRADING LOGIC ====================
+// ==================== ENHANCED TRADING LOGIC WITH LIMIT ORDERS ====================
 calculated_qty = (strategy.equity * leverage) / close
 qty_to_trade = close > 0 and strategy.equity > 0 ? math.abs(calculated_qty) : 0
 can_trade = strategy.equity > 0 and qty_to_trade > 0.000000001
 
-// SHORT ENTRIES (Enhanced with filters)
+// Helper functions for TP/SL calculation
+calculate_tp_sl_long(entry_price) =>
+    tp = use_pips_tp_sl ? entry_price + tp_pips * syminfo.mintick : entry_price * (1 + tp_percent)
+    sl = use_pips_tp_sl ? entry_price - sl_pips * syminfo.mintick : entry_price * (1 - sl_percent)
+    [tp, sl]
+
+calculate_tp_sl_short(entry_price) =>
+    tp = use_pips_tp_sl ? entry_price - tp_pips * syminfo.mintick : entry_price * (1 - tp_percent)
+    sl = use_pips_tp_sl ? entry_price + sl_pips * syminfo.mintick : entry_price * (1 + sl_percent)
+    [tp, sl]
+
+// SHORT ENTRIES
 if is_current_fib_downtrend and not has_open_long_positions() and barstate.isconfirmed and not na(actual_fib_1) and can_trade and short_filter_passed
-    if use_fib_level_1 and ta.crossover(close, actual_fib_1) and not f1_short_triggered_this_fib
-        strategy.order("Short F1", strategy.short, qty=qty_to_trade)
-        f1_short_triggered_this_fib := true
-    if use_fib_level_2 and ta.crossover(close, actual_fib_2) and not f2_short_triggered_this_fib
-        strategy.order("Short F2", strategy.short, qty=qty_to_trade)
-        f2_short_triggered_this_fib := true
-    if use_fib_level_3 and ta.crossover(close, actual_fib_3) and not f3_short_triggered_this_fib
-        strategy.order("Short F3", strategy.short, qty=qty_to_trade)
-        f3_short_triggered_this_fib := true
-    if use_fib_level_4 and ta.crossover(close, actual_fib_4) and not f4_short_triggered_this_fib
-        strategy.order("Short F4", strategy.short, qty=qty_to_trade)
-        f4_short_triggered_this_fib := true
+    if use_limit_orders
+        // Place limit orders for short entries
+        if use_fib_level_1 and not f1_short_triggered_this_fib
+            limit_price = actual_fib_1 * (1 - limit_offset_percent)
+            [tp, sl] = calculate_tp_sl_short(limit_price)
+            pending_f1_short_id := "Short F1 Limit " + str.tostring(bar_index)
+            strategy.order(pending_f1_short_id, strategy.short, qty=qty_to_trade, limit=limit_price)
+            f1_short_triggered_this_fib := true
+            
+        if use_fib_level_2 and not f2_short_triggered_this_fib
+            limit_price = actual_fib_2 * (1 - limit_offset_percent)
+            [tp, sl] = calculate_tp_sl_short(limit_price)
+            pending_f2_short_id := "Short F2 Limit " + str.tostring(bar_index)
+            strategy.order(pending_f2_short_id, strategy.short, qty=qty_to_trade, limit=limit_price)
+            f2_short_triggered_this_fib := true
+            
+        if use_fib_level_3 and not f3_short_triggered_this_fib
+            limit_price = actual_fib_3 * (1 - limit_offset_percent)
+            [tp, sl] = calculate_tp_sl_short(limit_price)
+            pending_f3_short_id := "Short F3 Limit " + str.tostring(bar_index)
+            strategy.order(pending_f3_short_id, strategy.short, qty=qty_to_trade, limit=limit_price)
+            f3_short_triggered_this_fib := true
+            
+        if use_fib_level_4 and not f4_short_triggered_this_fib
+            limit_price = actual_fib_4 * (1 - limit_offset_percent)
+            [tp, sl] = calculate_tp_sl_short(limit_price)
+            pending_f4_short_id := "Short F4 Limit " + str.tostring(bar_index)
+            strategy.order(pending_f4_short_id, strategy.short, qty=qty_to_trade, limit=limit_price)
+            f4_short_triggered_this_fib := true
+    else
+        // Original market order logic
+        if use_fib_level_1 and ta.crossover(close, actual_fib_1) and not f1_short_triggered_this_fib
+            strategy.order("Short F1", strategy.short, qty=qty_to_trade)
+            f1_short_triggered_this_fib := true
+        if use_fib_level_2 and ta.crossover(close, actual_fib_2) and not f2_short_triggered_this_fib
+            strategy.order("Short F2", strategy.short, qty=qty_to_trade)
+            f2_short_triggered_this_fib := true
+        if use_fib_level_3 and ta.crossover(close, actual_fib_3) and not f3_short_triggered_this_fib
+            strategy.order("Short F3", strategy.short, qty=qty_to_trade)
+            f3_short_triggered_this_fib := true
+        if use_fib_level_4 and ta.crossover(close, actual_fib_4) and not f4_short_triggered_this_fib
+            strategy.order("Short F4", strategy.short, qty=qty_to_trade)
+            f4_short_triggered_this_fib := true
 
-// LONG ENTRIES (Enhanced with filters)
+// LONG ENTRIES
 if not is_current_fib_downtrend and not has_open_short_positions() and barstate.isconfirmed and not na(actual_fib_1) and can_trade and long_filter_passed
-    if use_fib_level_1 and ta.crossunder(close, actual_fib_1) and not f1_long_triggered_this_fib
-        strategy.order("Long F1", strategy.long, qty=qty_to_trade)
-        f1_long_triggered_this_fib := true
-    if use_fib_level_2 and ta.crossunder(close, actual_fib_2) and not f2_long_triggered_this_fib
-        strategy.order("Long F2", strategy.long, qty=qty_to_trade)
-        f2_long_triggered_this_fib := true
-    if use_fib_level_3 and ta.crossunder(close, actual_fib_3) and not f3_long_triggered_this_fib
-        strategy.order("Long F3", strategy.long, qty=qty_to_trade)
-        f3_long_triggered_this_fib := true
-    if use_fib_level_4 and ta.crossunder(close, actual_fib_4) and not f4_long_triggered_this_fib
-        strategy.order("Long F4", strategy.long, qty=qty_to_trade)
-        f4_long_triggered_this_fib := true
+    if use_limit_orders
+        // Place limit orders for long entries
+        if use_fib_level_1 and not f1_long_triggered_this_fib
+            limit_price = actual_fib_1 * (1 + limit_offset_percent)
+            [tp, sl] = calculate_tp_sl_long(limit_price)
+            pending_f1_long_id := "Long F1 Limit " + str.tostring(bar_index)
+            strategy.order(pending_f1_long_id, strategy.long, qty=qty_to_trade, limit=limit_price)
+            f1_long_triggered_this_fib := true
+            
+        if use_fib_level_2 and not f2_long_triggered_this_fib
+            limit_price = actual_fib_2 * (1 + limit_offset_percent)
+            [tp, sl] = calculate_tp_sl_long(limit_price)
+            pending_f2_long_id := "Long F2 Limit " + str.tostring(bar_index)
+            strategy.order(pending_f2_long_id, strategy.long, qty=qty_to_trade, limit=limit_price)
+            f2_long_triggered_this_fib := true
+            
+        if use_fib_level_3 and not f3_long_triggered_this_fib
+            limit_price = actual_fib_3 * (1 + limit_offset_percent)
+            [tp, sl] = calculate_tp_sl_long(limit_price)
+            pending_f3_long_id := "Long F3 Limit " + str.tostring(bar_index)
+            strategy.order(pending_f3_long_id, strategy.long, qty=qty_to_trade, limit=limit_price)
+            f3_long_triggered_this_fib := true
+            
+        if use_fib_level_4 and not f4_long_triggered_this_fib
+            limit_price = actual_fib_4 * (1 + limit_offset_percent)
+            [tp, sl] = calculate_tp_sl_long(limit_price)
+            pending_f4_long_id := "Long F4 Limit " + str.tostring(bar_index)
+            strategy.order(pending_f4_long_id, strategy.long, qty=qty_to_trade, limit=limit_price)
+            f4_long_triggered_this_fib := true
+    else
+        // Original market order logic
+        if use_fib_level_1 and ta.crossunder(close, actual_fib_1) and not f1_long_triggered_this_fib
+            strategy.order("Long F1", strategy.long, qty=qty_to_trade)
+            f1_long_triggered_this_fib := true
+        if use_fib_level_2 and ta.crossunder(close, actual_fib_2) and not f2_long_triggered_this_fib
+            strategy.order("Long F2", strategy.long, qty=qty_to_trade)
+            f2_long_triggered_this_fib := true
+        if use_fib_level_3 and ta.crossunder(close, actual_fib_3) and not f3_long_triggered_this_fib
+            strategy.order("Long F3", strategy.long, qty=qty_to_trade)
+            f3_long_triggered_this_fib := true
+        if use_fib_level_4 and ta.crossunder(close, actual_fib_4) and not f4_long_triggered_this_fib
+            strategy.order("Long F4", strategy.long, qty=qty_to_trade)
+            f4_long_triggered_this_fib := true
 
-// ==================== EXIT LOGIC (UNCHANGED) ====================
+// ==================== EXIT LOGIC ====================
 var float tp_level_long = na
 var float sl_level_long = na
 var float tp_level_short = na
@@ -353,7 +534,7 @@ plot(sl_level_long, color=color.new(color.red, 0), title="SL Long", style=plot.s
 plot(tp_level_short, color=color.new(color.green, 0), title="TP Short", style=plot.style_linebr, display=show_markers ? display.all : display.none)
 plot(sl_level_short, color=color.new(color.red, 0), title="SL Short", style=plot.style_linebr, display=show_markers ? display.all : display.none)
 
-// ==================== EXIT MARKERS (UNCHANGED) ====================
+// ==================== EXIT MARKERS ====================
 if show_markers and strategy.closedtrades > 0
     var last_exit_bar = 0
     var float last_exit_price = 0.0
@@ -376,36 +557,53 @@ if show_markers and strategy.closedtrades > 0
             else if not na(sl_level_short[1]) and close >= sl_level_short[1] 
                 label.new(bar_index, high + syminfo.mintick * 10, text="SL Short", color=color.new(color.red, 0), style=label.style_label_down, textcolor=color.white)
 
-// ==================== FILTER STATUS TABLE ====================
+// ==================== MARKET STATUS DISPLAY ====================
+var label market_status_label = na
 if barstate.islast
-    var table filter_table = table.new(position.top_right, 2, 8, bgcolor=color.new(color.white, 80), border_width=1)
+    label.delete(market_status_label)
+    if use_market_status
+        market_status_label := label.new(x=bar_index + 5, y=high[0], text=market_status_text + " (" + market_tf + ")", color=market_status_color, style=label.style_label_left, textcolor=color.white, size=size.normal)
+
+// ==================== ENHANCED FILTER STATUS TABLE ====================
+if barstate.islast
+    var table filter_table = table.new(position.top_right, 2, 10, bgcolor=color.new(color.white, 80), border_width=1)
+    
+    // Headers
     table.cell(filter_table, 0, 0, "Filter", text_color=color.black, text_size=size.small)
     table.cell(filter_table, 1, 0, "Status", text_color=color.black, text_size=size.small)
     
-    table.cell(filter_table, 0, 1, "Trend", text_color=color.black, text_size=size.tiny)
-    table.cell(filter_table, 1, 1, use_trend_filter ? (is_uptrend ? "↑" : "↓") : "OFF", 
-               text_color=use_trend_filter ? (is_uptrend ? color.green : color.red) : color.gray, text_size=size.tiny)
+    // Market Status
+    table.cell(filter_table, 0, 1, "Market", text_color=color.black, text_size=size.tiny)
+    table.cell(filter_table, 1, 1, use_market_status ? market_status_text : "OFF", text_color=use_market_status ? market_status_color : color.gray, text_size=size.tiny)
     
-    table.cell(filter_table, 0, 2, "RSI", text_color=color.black, text_size=size.tiny)
-    table.cell(filter_table, 1, 2, use_rsi_filter ? str.tostring(math.round(rsi)) : "OFF", 
-               text_color=use_rsi_filter ? (rsi_bullish or rsi_bearish ? color.green : color.orange) : color.gray, text_size=size.tiny)
+    // Order Type
+    table.cell(filter_table, 0, 2, "Orders", text_color=color.black, text_size=size.tiny)
+    table.cell(filter_table, 1, 2, use_limit_orders ? "LIMIT" : "MARKET", text_color=use_limit_orders ? color.blue : color.orange, text_size=size.tiny)
     
-    table.cell(filter_table, 0, 3, "Volume", text_color=color.black, text_size=size.tiny)
-    table.cell(filter_table, 1, 3, use_volume_filter ? (high_volume ? "✓" : "✗") : "OFF", 
-               text_color=use_volume_filter ? (high_volume ? color.green : color.red) : color.gray, text_size=size.tiny)
+    // Trend Filter
+    table.cell(filter_table, 0, 3, "Trend", text_color=color.black, text_size=size.tiny)
+    table.cell(filter_table, 1, 3, use_trend_filter ? (is_uptrend ? "↑" : "↓") : "OFF", text_color=use_trend_filter ? (is_uptrend ? color.green : color.red) : color.gray, text_size=size.tiny)
     
-    table.cell(filter_table, 0, 4, "ATR", text_color=color.black, text_size=size.tiny)
-    table.cell(filter_table, 1, 4, use_atr_filter ? (sufficient_volatility ? "✓" : "✗") : "OFF", 
-               text_color=use_atr_filter ? (sufficient_volatility ? color.green : color.red) : color.gray, text_size=size.tiny)
+    // RSI Filter
+    table.cell(filter_table, 0, 4, "RSI", text_color=color.black, text_size=size.tiny)
+    table.cell(filter_table, 1, 4, use_rsi_filter ? str.tostring(math.round(rsi)) : "OFF", text_color=use_rsi_filter ? (rsi_bullish or rsi_bearish ? color.green : color.orange) : color.gray, text_size=size.tiny)
     
-    table.cell(filter_table, 0, 5, "S/R", text_color=color.black, text_size=size.tiny)
-    table.cell(filter_table, 1, 5, use_sr_filter ? (near_support or near_resistance ? "✓" : "✗") : "OFF", 
-               text_color=use_sr_filter ? (near_support or near_resistance ? color.green : color.red) : color.gray, text_size=size.tiny)
+    // Volume Filter
+    table.cell(filter_table, 0, 5, "Volume", text_color=color.black, text_size=size.tiny)
+    table.cell(filter_table, 1, 5, use_volume_filter ? (high_volume ? "✓" : "✗") : "OFF", text_color=use_volume_filter ? (high_volume ? color.green : color.red) : color.gray, text_size=size.tiny)
     
-    table.cell(filter_table, 0, 6, "HTF", text_color=color.black, text_size=size.tiny)
-    table.cell(filter_table, 1, 6, use_htf_filter ? (htf_bullish ? "↑" : "↓") : "OFF", 
-               text_color=use_htf_filter ? (htf_bullish ? color.green : color.red) : color.gray, text_size=size.tiny)
+    // ATR Filter
+    table.cell(filter_table, 0, 6, "ATR", text_color=color.black, text_size=size.tiny)
+    table.cell(filter_table, 1, 6, use_atr_filter ? (sufficient_volatility ? "✓" : "✗") : "OFF", text_color=use_atr_filter ? (sufficient_volatility ? color.green : color.red) : color.gray, text_size=size.tiny)
     
-    table.cell(filter_table, 0, 7, "Time", text_color=color.black, text_size=size.tiny)
-    table.cell(filter_table, 1, 7, use_time_filter ? (in_trading_hours ? "✓" : "✗") : "OFF", 
-               text_color=use_time_filter ? (in_trading_hours ? color.green : color.red) : color.gray, text_size=size.tiny)
+    // S/R Filter
+    table.cell(filter_table, 0, 7, "S/R", text_color=color.black, text_size=size.tiny)
+    table.cell(filter_table, 1, 7, use_sr_filter ? (near_support or near_resistance ? "✓" : "✗") : "OFF", text_color=use_sr_filter ? (near_support or near_resistance ? color.green : color.red) : color.gray, text_size=size.tiny)
+    
+    // HTF Filter
+    table.cell(filter_table, 0, 8, "HTF", text_color=color.black, text_size=size.tiny)
+    table.cell(filter_table, 1, 8, use_htf_filter ? (htf_bullish ? "↑" : "↓") : "OFF", text_color=use_htf_filter ? (htf_bullish ? color.green : color.red) : color.gray, text_size=size.tiny)
+    
+    // Time Filter
+    table.cell(filter_table, 0, 9, "Time", text_color=color.black, text_size=size.tiny)
+    table.cell(filter_table, 1, 9, use_time_filter ? (in_trading_hours ? "✓" : "✗") : "OFF", text_color=use_time_filter ? (in_trading_hours ? color.green : color.red) : color.gray, text_size=size.tiny)
