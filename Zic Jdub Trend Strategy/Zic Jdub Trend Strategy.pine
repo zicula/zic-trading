@@ -1,0 +1,264 @@
+//@version=5
+// Zic Jdub Trend Strategy - Complete Implementation Based on Video Analysis
+// Professional Trend Following Strategy with Dynamic Risk Management
+strategy("Zic Jdub Trend Strategy v0.01 - Complete Implementation", 
+         shorttitle="Jdub Trend v0.01",
+         overlay=true,
+         max_lines_count=500, 
+         max_labels_count=500, 
+         max_bars_back=5000,
+         initial_capital=1000,
+         commission_type=strategy.commission.percent,
+         commission_value=0.045,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=100)
+
+// ==================== STRATEGY CONFIGURATION ====================
+g1 = "═══ EMA Settings ═══"
+ema_fast_length = input.int(20, title="EMA Fast (Dynamic Support/Resistance)", minval=1, group=g1, tooltip="EMA 20 - แนวรับ-แนวต้านไดนามิก และ Trailing Stop")
+ema_medium_length = input.int(50, title="EMA Medium (Trend Support)", minval=1, group=g1, tooltip="EMA 50 - เส้นประคองแนวโน้ม และ Stop Loss หลัก")
+ema_slow_length = input.int(100, title="EMA Slow (Main Trend)", minval=1, group=g1, tooltip="EMA 100 - เส้นยืนยันแนวโน้มหลัก")
+
+g2 = "═══ Entry Conditions ═══"
+use_fanning_filter = input.bool(true, title="Use EMA Fanning Filter", group=g2, tooltip="ตรวจสอบการกางออกของเส้น EMA")
+min_fanning_distance = input.float(0.0001, title="Minimum Fanning Distance (%)", step=0.0001, group=g2, tooltip="ระยะห่างขั้นต่ำระหว่าง EMA 50-100")
+require_strong_candle = input.bool(true, title="Require Strong Confirmation Candle", group=g2, tooltip="ต้องการแท่งเทียนยืนยันที่แข็งแรง")
+min_candle_body_percent = input.float(60.0, title="Min Candle Body %", minval=30.0, maxval=90.0, group=g2, tooltip="เปอร์เซ็นต์ขั้นต่ำของลำตัวเทียน")
+
+g3 = "═══ Risk Management ═══"
+risk_per_trade = input.float(2.0, title="Risk Per Trade (%)", minval=0.1, maxval=10.0, step=0.1, group=g3)
+risk_reward_ratio = input.float(2.0, title="Initial Risk/Reward Ratio", minval=1.0, maxval=5.0, step=0.1, group=g3)
+use_breakeven = input.bool(true, title="Move to Breakeven at 1R", group=g3, tooltip="เลื่อน Stop Loss ไป Entry Price เมื่อได้กำไร 1R")
+use_trailing_stop = input.bool(true, title="Use EMA 20 Trailing Stop", group=g3, tooltip="ใช้ EMA 20 เป็น Trailing Stop")
+
+g4 = "═══ Trend Filter ═══"
+use_adx_filter = input.bool(true, title="Use ADX Trend Filter", group=g4, tooltip="ใช้ ADX กรองสภาวะตลาด")
+adx_length = input.int(14, title="ADX Length", minval=5, maxval=50, group=g4)
+adx_threshold = input.float(25.0, title="ADX Threshold", minval=15.0, maxval=40.0, step=1.0, group=g4, tooltip="ADX ต้องสูงกว่าค่านี้")
+
+g5 = "═══ Visual Settings ═══"
+show_ema_cloud = input.bool(true, title="Show EMA Cloud", group=g5)
+show_entry_signals = input.bool(true, title="Show Entry Signals", group=g5)
+show_zone_background = input.bool(true, title="Show Value Zone Background", group=g5)
+show_trend_direction = input.bool(true, title="Show Trend Direction", group=g5)
+
+// ==================== TECHNICAL CALCULATIONS ====================
+
+// EMA Calculations
+ema_fast = ta.ema(close, ema_fast_length)
+ema_medium = ta.ema(close, ema_medium_length)
+ema_slow = ta.ema(close, ema_slow_length)
+
+// ADX Calculation for Trend Strength
+adx_value = ta.adx(high, low, close, adx_length)
+strong_trend = adx_value > adx_threshold
+
+// Trend Direction Analysis
+bullish_stacking = ema_fast > ema_medium and ema_medium > ema_slow
+bearish_stacking = ema_fast < ema_medium and ema_medium < ema_slow
+
+// EMA Fanning Analysis (การกางออกของเส้น EMA)
+ema_distance_current = math.abs(ema_medium - ema_slow) / close
+ema_distance_previous = math.abs(ema_medium[1] - ema_slow[1]) / close[1]
+emas_fanning_out = ema_distance_current >= ema_distance_previous and ema_distance_current >= min_fanning_distance
+
+// Dynamic Value Zone (โซนซื้อ-ขายที่ได้เปรียบ)
+in_long_value_zone = close <= ema_fast and close > ema_medium and bullish_stacking
+in_short_value_zone = close >= ema_fast and close < ema_medium and bearish_stacking
+
+// Candle Strength Analysis
+candle_body = math.abs(close - open)
+candle_range = high - low
+candle_body_percent = candle_range > 0 ? (candle_body / candle_range) * 100 : 0
+is_strong_bullish_candle = close > open and candle_body_percent >= min_candle_body_percent
+is_strong_bearish_candle = close < open and candle_body_percent >= min_candle_body_percent
+
+// ==================== ENTRY CONDITIONS ====================
+
+// Long Entry Conditions
+long_trend_condition = bullish_stacking and (not use_adx_filter or strong_trend)
+long_fanning_condition = not use_fanning_filter or emas_fanning_out
+long_pullback_condition = in_long_value_zone[1] // ราคาเคยอยู่ใน Value Zone
+long_confirmation_condition = close > ema_fast and close[1] <= ema_fast[1] // Cross above EMA 20
+long_candle_strength = not require_strong_candle or is_strong_bullish_candle
+
+long_entry_signal = long_trend_condition and long_fanning_condition and long_pullback_condition and long_confirmation_condition and long_candle_strength
+
+// Short Entry Conditions  
+short_trend_condition = bearish_stacking and (not use_adx_filter or strong_trend)
+short_fanning_condition = not use_fanning_filter or emas_fanning_out
+short_pullback_condition = in_short_value_zone[1] // ราคาเคยอยู่ใน Value Zone
+short_confirmation_condition = close < ema_fast and close[1] >= ema_fast[1] // Cross below EMA 20
+short_candle_strength = not require_strong_candle or is_strong_bearish_candle
+
+short_entry_signal = short_trend_condition and short_fanning_condition and short_pullback_condition and short_confirmation_condition and short_candle_strength
+
+// ==================== POSITION SIZING & RISK CALCULATION ====================
+
+// Calculate position size based on risk percentage
+calculate_position_size(entry_price, stop_loss_price, risk_percent) =>
+    risk_amount = strategy.equity * (risk_percent / 100)
+    risk_per_unit = math.abs(entry_price - stop_loss_price)
+    risk_per_unit > 0 ? risk_amount / risk_per_unit : 0
+
+// ==================== TRADING LOGIC ====================
+
+// Entry Logic
+if long_entry_signal and strategy.position_size == 0
+    entry_price = close
+    stop_loss_price = ema_medium
+    take_profit_price = entry_price + (math.abs(entry_price - stop_loss_price) * risk_reward_ratio)
+    position_size = calculate_position_size(entry_price, stop_loss_price, risk_per_trade)
+    
+    if position_size > 0
+        strategy.entry("Long", strategy.long, qty=position_size)
+        strategy.exit("Long Exit", "Long", limit=take_profit_price, stop=stop_loss_price)
+
+if short_entry_signal and strategy.position_size == 0
+    entry_price = close
+    stop_loss_price = ema_medium  
+    take_profit_price = entry_price - (math.abs(entry_price - stop_loss_price) * risk_reward_ratio)
+    position_size = calculate_position_size(entry_price, stop_loss_price, risk_per_trade)
+    
+    if position_size > 0
+        strategy.entry("Short", strategy.short, qty=position_size)
+        strategy.exit("Short Exit", "Short", limit=take_profit_price, stop=stop_loss_price)
+
+// ==================== DYNAMIC EXIT MANAGEMENT ====================
+
+// Variables for tracking trade management
+var float entry_price_long = na
+var float entry_price_short = na
+var bool moved_to_breakeven_long = false
+var bool moved_to_breakeven_short = false
+
+// Track entry prices
+if strategy.position_size > 0 and strategy.position_size[1] == 0
+    entry_price_long := strategy.position_avg_price
+    moved_to_breakeven_long := false
+
+if strategy.position_size < 0 and strategy.position_size[1] == 0
+    entry_price_short := strategy.position_avg_price
+    moved_to_breakeven_short := false
+
+// Reset when position closes
+if strategy.position_size == 0
+    entry_price_long := na
+    entry_price_short := na
+    moved_to_breakeven_long := false
+    moved_to_breakeven_short := false
+
+// Long Position Management
+if strategy.position_size > 0 and not na(entry_price_long)
+    unrealized_profit = (close - entry_price_long) / entry_price_long
+    risk_amount = (entry_price_long - ema_medium) / entry_price_long
+    
+    // Move to breakeven at 1R profit
+    if use_breakeven and not moved_to_breakeven_long and unrealized_profit >= risk_amount
+        strategy.exit("Long Exit", "Long", stop=entry_price_long)
+        moved_to_breakeven_long := true
+    
+    // Trailing stop with EMA 20 after breakeven
+    if use_trailing_stop and moved_to_breakeven_long and close < ema_fast
+        strategy.close("Long", comment="Trailing Stop")
+
+// Short Position Management
+if strategy.position_size < 0 and not na(entry_price_short)
+    unrealized_profit = (entry_price_short - close) / entry_price_short
+    risk_amount = (ema_medium - entry_price_short) / entry_price_short
+    
+    // Move to breakeven at 1R profit
+    if use_breakeven and not moved_to_breakeven_short and unrealized_profit >= math.abs(risk_amount)
+        strategy.exit("Short Exit", "Short", stop=entry_price_short)
+        moved_to_breakeven_short := true
+    
+    // Trailing stop with EMA 20 after breakeven  
+    if use_trailing_stop and moved_to_breakeven_short and close > ema_fast
+        strategy.close("Short", comment="Trailing Stop")
+
+// ==================== VISUAL ELEMENTS ====================
+
+// Plot EMAs
+plot(ema_fast, color=color.new(color.blue, 0), linewidth=2, title="EMA Fast (20)")
+plot(ema_medium, color=color.new(color.orange, 0), linewidth=2, title="EMA Medium (50)")  
+plot(ema_slow, color=color.new(color.red, 0), linewidth=2, title="EMA Slow (100)")
+
+// EMA Cloud
+ema_cloud_color = bullish_stacking ? color.new(color.green, 90) : bearish_stacking ? color.new(color.red, 90) : color.new(color.gray, 95)
+fill(plot(ema_fast), plot(ema_medium), color=show_ema_cloud ? ema_cloud_color : na, title="EMA Cloud")
+
+// Value Zone Background
+value_zone_color = in_long_value_zone ? color.new(color.green, 95) : in_short_value_zone ? color.new(color.red, 95) : na
+bgcolor(show_zone_background ? value_zone_color : na, title="Value Zone")
+
+// Trend Direction Background
+trend_bg_color = bullish_stacking and strong_trend ? color.new(color.green, 98) : 
+                 bearish_stacking and strong_trend ? color.new(color.red, 98) : 
+                 color.new(color.gray, 99)
+bgcolor(show_trend_direction ? trend_bg_color : na, title="Trend Background")
+
+// Entry Signals
+plotshape(show_entry_signals and long_entry_signal, style=shape.triangleup, location=location.belowbar, 
+          color=color.new(color.green, 0), size=size.normal, title="Long Entry Signal")
+plotshape(show_entry_signals and short_entry_signal, style=shape.triangledown, location=location.abovebar, 
+          color=color.new(color.red, 0), size=size.normal, title="Short Entry Signal")
+
+// ==================== INFORMATION TABLE ====================
+if barstate.islast
+    var table info_table = table.new(position.top_right, 2, 10, bgcolor=color.new(color.white, 85), border_width=1)
+    
+    table.cell(info_table, 0, 0, "Jdub Trend v0.01", text_color=color.black, text_size=size.small, bgcolor=color.new(color.blue, 80))
+    table.cell(info_table, 1, 0, "Status", text_color=color.white, text_size=size.small, bgcolor=color.new(color.blue, 80))
+    
+    // Trend Status
+    trend_status = bullish_stacking ? "Bullish" : bearish_stacking ? "Bearish" : "Sideways"
+    trend_color = bullish_stacking ? color.green : bearish_stacking ? color.red : color.gray
+    table.cell(info_table, 0, 1, "Trend", text_color=color.black, text_size=size.tiny)
+    table.cell(info_table, 1, 1, trend_status, text_color=trend_color, text_size=size.tiny)
+    
+    // ADX Status
+    adx_status = str.tostring(math.round(adx_value, 1))
+    adx_color = strong_trend ? color.green : color.red
+    table.cell(info_table, 0, 2, "ADX", text_color=color.black, text_size=size.tiny)
+    table.cell(info_table, 1, 2, adx_status, text_color=adx_color, text_size=size.tiny)
+    
+    // Fanning Status
+    fanning_status = emas_fanning_out ? "Yes" : "No"
+    fanning_color = emas_fanning_out ? color.green : color.red
+    table.cell(info_table, 0, 3, "EMA Fanning", text_color=color.black, text_size=size.tiny)
+    table.cell(info_table, 1, 3, fanning_status, text_color=fanning_color, text_size=size.tiny)
+    
+    // Value Zone Status
+    zone_status = in_long_value_zone ? "Long Zone" : in_short_value_zone ? "Short Zone" : "Outside"
+    zone_color = in_long_value_zone ? color.green : in_short_value_zone ? color.red : color.gray
+    table.cell(info_table, 0, 4, "Value Zone", text_color=color.black, text_size=size.tiny)
+    table.cell(info_table, 1, 4, zone_status, text_color=zone_color, text_size=size.tiny)
+    
+    // Position Status
+    position_status = strategy.position_size > 0 ? "Long" : strategy.position_size < 0 ? "Short" : "Flat"
+    position_color = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(info_table, 0, 5, "Position", text_color=color.black, text_size=size.tiny)
+    table.cell(info_table, 1, 5, position_status, text_color=position_color, text_size=size.tiny)
+    
+    // P&L Status
+    if strategy.position_size != 0
+        pnl_percent = (strategy.position_avg_price > 0) ? ((close - strategy.position_avg_price) / strategy.position_avg_price * 100) : 0
+        if strategy.position_size < 0
+            pnl_percent := -pnl_percent
+        pnl_text = str.tostring(math.round(pnl_percent, 2)) + "%"
+        pnl_color = pnl_percent > 0 ? color.green : pnl_percent < 0 ? color.red : color.gray
+        table.cell(info_table, 0, 6, "Unrealized P&L", text_color=color.black, text_size=size.tiny)
+        table.cell(info_table, 1, 6, pnl_text, text_color=pnl_color, text_size=size.tiny)
+    
+    // Risk per trade
+    table.cell(info_table, 0, 7, "Risk/Trade", text_color=color.black, text_size=size.tiny)
+    table.cell(info_table, 1, 7, str.tostring(risk_per_trade) + "%", text_color=color.blue, text_size=size.tiny)
+    
+    // Strategy Performance
+    win_rate = strategy.wintrades > 0 ? (strategy.wintrades / (strategy.wintrades + strategy.losstrades)) * 100 : 0
+    table.cell(info_table, 0, 8, "Win Rate", text_color=color.black, text_size=size.tiny)
+    table.cell(info_table, 1, 8, str.tostring(math.round(win_rate, 1)) + "%", text_color=color.blue, text_size=size.tiny)
+
+// ==================== ALERTS ====================
+alertcondition(long_entry_signal, title="Long Entry Signal", message="Jdub Trend: Long Entry Signal Detected")
+alertcondition(short_entry_signal, title="Short Entry Signal", message="Jdub Trend: Short Entry Signal Detected")
